@@ -5,19 +5,6 @@ library(tidyverse)
 library(janitor)
 library(plotly)
 library(scales)
-library(extrafont)
-
-# con <- dbConnect(duckdb())
-# 
-# dbExecute(con, "
-#   COPY (
-#     SELECT * FROM read_csv_auto('311_Service_Requests_2024_2025.csv', all_varchar = TRUE)
-#   ) TO '311_Service_Requests_2024_2025.parquet' (FORMAT PARQUET)
-# ")
-# 
-# dbDisconnect(con) 
-
-
 # The broken windows theory is a criminological concept suggesting that 
 # visible signs of disorder, like broken windows, graffiti, and litter,
 # create an environment that encourages more serious crime. The theory 
@@ -26,28 +13,26 @@ library(extrafont)
 # activity. It gained prominence through its application in cities like
 # New York during the 1990s. 
 
-nyc_streets <- read_sf("~/Downloads/DCM_StreetNameChanges_Points_20251019 (1)/geo_export_67db49cf-9b2b-47e5-9ab1-d7311aba0766.shp")
-head(nyc_streets)
+# --------------------------------------------
+# importing data
 
-nyc_map <- read_sf("~/Downloads/nybb_25c/nybb.shp")
+nyc_map <- 
+  read_sf("~/Downloads/nybb_25c/nybb.shp") # NYC map
 nyc_map <- nyc_map %>% 
-  mutate(BoroName = tolower(BoroName))
+  mutate(BoroName = tolower(BoroName)) %>% 
+  st_transform(2263)
 head(nyc_map)
 
-requests_data <- read_parquet_duckdb("~/Downloads/311_Service_Requests_2024_2025.parquet") #важливо!!! дані за 2024-2025 рік бо якщо брати все це 41 млн рядків й воно просто в мене ніяк не скачалось якщо треба буде можу ще окремо взяти ще якийсь рік
+requests_data <- 
+  read_parquet_duckdb("~/Downloads/311_Service_Requests_2024_2025.parquet") #важливо!!! дані за 2024-2025 рік бо якщо брати все це 41 млн рядків й воно просто в мене ніяк не скачалось якщо треба буде можу ще окремо взяти ще якийсь рік
 head(requests_data)
-colnames(requests_data)
-requests_data %>% select("X Coordinate (State Plane)", "Y Coordinate (State Plane)")
-# Non-emergency municipal services 2024 - 2025
+colnames(requests_data) # Non-emergency municipal services 2024 - 2025
 
-сomplaints_data <- read_parquet_duckdb("~/Downloads/nyc_complaints.parquet")
+сomplaints_data <- 
+  read_parquet_duckdb("~/Downloads/nyc_complaints.parquet")
 # Valid felony, misdemeanor, and violation crimes reported to the New York City Police Department (NYPD) from 2006 to the end of last year (2019). 
 head(сomplaints_data)
-сomplaints_data %>% select(X_COORD_CD, Y_COORD_CD)
-
 colnames(сomplaints_data)
-
-library(dplyr)
 
 # base dataframe
 suspects <- сomplaints_data |>
@@ -61,25 +46,19 @@ suspects <- сomplaints_data |>
   filter(CMPLNT_FR_DT >= as.Date('2024-01-01') & CMPLNT_FR_DT <= as.Date('2025-12-31')) |>
   clean_names()
 
-suspects_dt <- suspects %>% 
-  count(cmplnt_fr_dt)
-# фільтр по роках бо якщо далі якось порівнювати ці дві таюлиці то не спіпадіння в періодах впливаж на результат
-ggplot(suspects_dt, aes(x = cmplnt_fr_dt, y = n)) + geom_line()
-# pyramids on every crime type
 suspect_age <- suspects |> 
   filter(susp_age_group != "(null)", boro_nm != "Undefined", boro_nm != "(null)") |> 
   group_by(law_cat_cd, susp_age_group, boro_nm) |> 
   summarise(count = n()) |> 
   filter(grepl("\\d+-\\d+", susp_age_group)) |>
   collect() #результат виводу вікова група категорія злочину скільки людей в цій віковій групі зробили цей типу злочину й відсоток відносно своєї вікової групи
-suspect_age
 
 # 1
 ggplot(suspect_age, aes(fill=susp_age_group, y=count, x=law_cat_cd)) + 
   geom_bar(position="fill", stat="identity") + 
   facet_wrap(~ boro_nm, scale = "free_x") +
   theme_minimal() +
-  scale_fill_viridis_d(option = "cividis", direction = -1) +
+  scale_fill_viridis_d(option = "viridis", direction = -1) +
   labs(title = "Crime severity by borough", subtitle = "(2024 - 2025)", x = "Crime severity",
        y = NULL, fill = "Age", caption = "Source: NYC Open Data") +
   theme(plot.title = element_text(face = "bold", size = 18),
@@ -88,9 +67,6 @@ ggplot(suspect_age, aes(fill=susp_age_group, y=count, x=law_cat_cd)) +
         plot.margin = margin_auto(1, unit = "cm"), 
         axis.text = element_text(size = 8))
 
-
-
-# nyc map
 location <- suspects |> 
   filter(boro_nm != "(null)") |> 
   group_by(boro_nm) |> 
@@ -98,39 +74,17 @@ location <- suspects |>
   arrange(desc(total_cases)) |> #райони й кількість злочинів
   mutate(boro_nm = tolower(boro_nm)) |>
   collect()
-
-
-# loc_map <- nyc_map %>% 
-#   left_join(location, by = c("BoroName" = "boro_nm"))
-# class(loc_map)
-# loc_map
-# class(loc_map$total_cases)
-
-# loc <- ggplot() +
-#   geom_sf(data = loc_map, aes(fill = total_cases, text = paste0("Borough: ", BoroName)), color = "white", size = 0.15) + 
-#   coord_sf() +
-#   scale_fill_viridis_c(option = "magma", direction = 1, name = "Total Cases", trans = "sqrt") +
-#   theme_void()
-# ggplotly(loc, tooltip = "text")
-
-suspect_gender <- suspects |> 
-  filter(susp_sex != "(null)") |> 
-  group_by(susp_sex) |> 
-  summarise(total = n()) |> 
-  mutate(percentage = total / sum(total) * 100) |> #стать підозрюваних й кількість злочинів
-  collect()
-suspect_gender
-
+location
 
 #по суті аналогічно можна зробити для постраждалого 
-
-# requests_location <- requests_data |>
-#   filter(Borough != "(null)", Borough != "Unspecified") |>
-#   compute(prudence = "lavish") |>
-#   summarise(total_requests = n(), .by = Borough) |>
-#   arrange(desc(total_requests)) |>
-#   collect() #райони й кількість запитів 
-# requests_location
+requests_location <- requests_data |>
+  filter(Borough != "(null)", Borough != "Unspecified") |>
+  compute(prudence = "lavish") |>
+  summarise(total_requests = n(), .by = Borough) |>
+  arrange(desc(total_requests)) |>
+  mutate(Borough = tolower(Borough)) |>
+  collect() #райони й кількість запитів
+requests_location
 
 requests_loc <- requests_data %>% 
   clean_names() %>% 
@@ -142,13 +96,8 @@ requests_loc <- requests_data %>%
   filter(!is.na(x_coordinate_state_plane), !is.na(y_coordinate_state_plane)) %>% 
   st_as_sf(coords = c("x_coordinate_state_plane", "y_coordinate_state_plane"), crs = 2263)
 
-requests_loc
-
 suspects_map <- suspects %>% 
   st_as_sf(coords = c("x_coord_cd", "y_coord_cd"), crs = 2263)
-nyc_map %>% st_transform(2263)
-
-
 
 coords_m <- bind_rows(
   requests_loc %>%  select(geometry) %>% mutate(source = "311 Requests"),
@@ -163,14 +112,13 @@ coords <- coords_m %>%
   st_coordinates() %>%
   as_tibble() %>% 
   mutate(source = coords_m$source)
-coords
 
 # 2
 ggplot() + 
   geom_hex(data = coords, aes(x = X, y = Y, fill = after_stat(count)), bins = 40) + 
   facet_wrap(~ source) +
   geom_sf(data = st_transform(nyc_map, 4326), fill = NA, color = "white", alpha = 0.2, linewidth = 0.2) +
-  scale_fill_viridis_c(option = "cividis", direction = -1, trans = "log", labels = label_number(accuracy = 1)) +
+  scale_fill_viridis_c(option = "viridis", direction = -1, trans = "log10", labels = label_number(accuracy = 1)) +
   theme_void() + 
   labs(title = "311 complaints and violations comparison", subtitle = "NYC map", fill = "Count",
        caption = "Source: NYC Open Data") +
@@ -179,13 +127,6 @@ ggplot() +
         plot.background = element_rect(fill = "#fcfbfa", color = NA), 
         plot.margin = margin_auto(1, unit = "cm"))
 
-location_comparison <- location |>
-  inner_join(requests_location, by = c("boro_nm" = "Borough")) |>
-  mutate(
-    ratio = total_cases / total_requests
-  ) |>
-  arrange(desc(ratio))
-location_comparison
 
 unique_requests <- requests_data |>
   filter(Borough != "Unspecified") %>% 
@@ -199,16 +140,16 @@ unique_requests <- requests_data |>
 
 unique_requests <- unique_requests %>% 
   mutate(n = n/1000, `Complaint Type` = tolower(`Complaint Type`), 
-         case_when(`Complaint Type` == "homeless person assistance " ~ "homeless assistance",
+         complaint_type = case_when(`Complaint Type` == "homeless person assistance" ~ "homeless assistance",
                    T ~ `Complaint Type`))
 #  distinct() #не знаю можна зробить топ дебільних запитів або статистика скільки дивних запитів можна почути за день
-unique_requests
+
 
 # 3
-ggplot(unique_requests, aes(x = n, y = fct_reorder(`Complaint Type`, n), fill = Borough)) + 
+ggplot(unique_requests, aes(x = n, y = fct_reorder(complaint_type, n), fill = Borough)) + 
   geom_col() +
   facet_wrap(~ Borough, scale = "free") +
-  scale_fill_viridis_d(option = "cividis", direction = -1) +
+  scale_fill_viridis_d(option = "viridis", direction = -1) +
   theme_minimal() + 
   labs(title = "Common 311 complaints by borough", subtitle = "(2024 - 2025)", fill = "Borough",
        caption = "Source: NYC Open Data", y = NULL, x = "cases, k") +
@@ -218,8 +159,72 @@ ggplot(unique_requests, aes(x = n, y = fct_reorder(`Complaint Type`, n), fill = 
         plot.margin = margin_auto(1, unit = "cm"),
         axis.text = element_text(size = 8))
 
+location_comparison <- location |>
+  inner_join(requests_location, by = c("boro_nm" = "Borough")) |>
+  mutate(
+    ratio = (total_cases / total_requests) * 100, 
+    boro_nm = toupper(boro_nm)
+  ) |>
+  arrange(desc(ratio))
+location_comparison
 
+# 4
+ggplot(location_comparison, aes(x = ratio, y = reorder(boro_nm, ratio), fill = boro_nm)) + 
+  geom_col() +
+  scale_fill_viridis_d(option = "viridis", direction = -1) +
+  theme_minimal() + 
+  labs(title = "Complaints to crime ratio", subtitle = "(2024 - 2025)", fill = "Borough",
+       caption = "Source: NYC Open Data", y = NULL, x = "percentage") +
+  theme(plot.title = element_text(face = "bold", size = 18),
+        text = element_text(family = "sans"),
+        plot.background = element_rect(fill = "#fcfbfa", color = NA), 
+        plot.margin = margin_auto(1, unit = "cm"),
+        axis.text = element_text(size = 8))
 
+# ------------------------------------
+# analysis that was not included in the research
+
+# con <- dbConnect(duckdb())
+# 
+# dbExecute(con, "
+#   COPY (
+#     SELECT * FROM read_csv_auto('311_Service_Requests_2024_2025.csv', all_varchar = TRUE)
+#   ) TO '311_Service_Requests_2024_2025.parquet' (FORMAT PARQUET)
+# ")
+# 
+# dbDisconnect(con) 
+
+# nyc_streets <- read_sf("~/Downloads/DCM_StreetNameChanges_Points_20251019 (1)/geo_export_67db49cf-9b2b-47e5-9ab1-d7311aba0766.shp")
+# head(nyc_streets)
+
+# loc_map <- nyc_map %>% 
+#   left_join(location, by = c("BoroName" = "boro_nm"))
+# class(loc_map)
+# loc_map
+# class(loc_map$total_cases)
+
+# loc <- ggplot() +
+#   geom_sf(data = loc_map, aes(fill = total_cases, text = paste0("Borough: ", BoroName)), color = "white", size = 0.15) + 
+#   coord_sf() +
+#   scale_fill_viridis_c(option = "magma", direction = 1, name = "Total Cases", trans = "sqrt") +
+#   theme_void()
+# ggplotly(loc, tooltip = "text")
+
+# suspects_dt <- suspects %>% 
+#   count(cmplnt_fr_dt)
+# # фільтр по роках бо якщо далі якось порівнювати ці дві таюлиці то не спіпадіння в періодах впливаж на результат
+# ggplot(suspects_dt, aes(x = cmplnt_fr_dt, y = n)) + geom_line()
+
+# suspect_race <- suspects |> 
+#   filter(susp_race != "(null)") |> 
+#   group_by(susp_race) |> 
+#   summarise(total = n()) |> 
+#   arrange(-total) |>
+#   mutate(percentage = total / sum(total) * 100) |> #стать підозрюваних й кількість злочинів
+#   collect()
+# suspect_race
+
+#--------------------------------------
 # crime_requests <- requests_data |>
 #   select(`Complaint Type`, `Created Date`, Borough) |>
 #   compute(prudence = "lavish") |>
