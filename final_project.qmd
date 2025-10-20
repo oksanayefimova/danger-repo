@@ -1,0 +1,267 @@
+---
+title: "Final Project"
+subtitle: "Analyzing Visible Disorder and Criminal Activity in New York City (2024-2025)"
+author: "Anna Akhlamova, Oksana Yefimova, Olena Zinchuk"
+format: pdf
+---
+# Introduction
+
+For this project, we decided to analyze visible disorder (311 service requests) and criminal activity (suspect data) in New York City from 2024 to 2025.
+
+We used the broken windows theory as a basis for our analysis. 
+
+**The broken windows theory** is a criminological concept suggesting that visible signs of disorder, like broken windows, graffiti, and litter, create an environment that encourages more serious crime. The theory proposes that by aggressively policing minor offenses, authorities can maintain public order and prevent more significant criminal activity. It gained prominence through its application in cities like New York during the 1990s. 
+
+We are curious to see if there is a correlation between the two, and if there is, to find ways to fix it.
+
+# Data import
+
+Libraries:
+```{r, results='hide'}
+library(duckdb)
+library(duckplyr, warn.conflicts = FALSE)
+library(sf)
+library(tidyverse)
+library(janitor)
+library(plotly)
+library(scales)
+```
+
+
+The map of New York City from NYC Open Data portal:
+```{r}
+nyc_map <- 
+  read_sf("~/Downloads/nybb_25c/nybb.shp")
+nyc_map <- nyc_map %>% 
+  mutate(BoroName = tolower(BoroName)) %>% 
+  st_transform(2263)
+```
+
+Non-emergency municipal services 2024 - 2025 data:
+```{r}
+requests_data <- 
+  read_parquet_duckdb("~/Downloads/311_Service_Requests_2024_2025.parquet")
+```
+
+The data about valid felony, misdemeanor, and violation crimes reported to the New York City Police Department:
+```{r}
+сomplaints_data <- 
+  read_parquet_duckdb("~/Downloads/nyc_complaints.parquet")
+```
+
+# Crime severity by age group and borough
+
+Cleaned suspects data that retains only records with complete suspect and location data:
+```{r}
+suspects <- сomplaints_data |>
+  select(CMPLNT_NUM, SUSP_AGE_GROUP, SUSP_RACE, SUSP_SEX, LAW_CAT_CD, OFNS_DESC, BORO_NM, CMPLNT_FR_DT, X_COORD_CD, Y_COORD_CD) |>
+  collect() |>
+  filter(!is.na(SUSP_AGE_GROUP), SUSP_AGE_GROUP != "UNKNOWN", !is.na(X_COORD_CD), !is.na(Y_COORD_CD)) |>
+  mutate(
+    CMPLNT_FR_DT = as.Date(CMPLNT_FR_DT, format = "%m/%d/%Y"),
+    X_COORD_CD = as.numeric(gsub(",", "", X_COORD_CD)),
+    Y_COORD_CD = as.numeric(gsub(",", "", Y_COORD_CD))) |>
+  filter(CMPLNT_FR_DT >= as.Date('2024-01-01') & CMPLNT_FR_DT <= as.Date('2025-12-31')) |>
+  clean_names()
+```
+
+The output provides the count and age group percentage for each combination of age group and crime severity:
+```{r}
+suspect_age <- suspects |> 
+  filter(susp_age_group != "(null)", boro_nm != "Undefined", boro_nm != "(null)") |> 
+  group_by(law_cat_cd, susp_age_group, boro_nm) |> 
+  summarise(count = n()) |> 
+  filter(grepl("\\d+-\\d+", susp_age_group)) |>
+  collect() 
+```
+
+The visualization of said data:
+```{r}
+ggplot(suspect_age, aes(fill=susp_age_group, y=count, x=law_cat_cd)) + 
+  geom_bar(position="fill", stat="identity") + 
+  facet_wrap(~ boro_nm, scale = "free_x") +
+  theme_minimal() +
+  scale_fill_viridis_d(option = "viridis", direction = -1) +
+  labs(title = "Crime severity by borough", subtitle = "(2024 - 2025)", x = "Crime severity",
+       y = NULL, fill = "Age", caption = "Source: NYC Open Data") +
+  theme(plot.title = element_text(face = "bold", size = 18),
+        text = element_text(family = "sans"),
+        plot.background = element_rect(fill = "#fcfbfa", color = NA), 
+        plot.margin = margin_auto(1, unit = "cm"), 
+        axis.text = element_text(size = 8))
+```
+
+We can see from the plot that in every single category, the 25-44 age group makes up the clear majority, while the 18-24 group makes up the smallest share of crimes. The share for each age group stays the same, no matter which borough or type of crime.
+
+# 311 complaints and violations comparison
+
+Filtering null boroughs from the suspects table, counting the total cases for each borough, and sorting them from highest to lowest:
+```{r}
+location <- suspects |> 
+  filter(boro_nm != "(null)") |> 
+  group_by(boro_nm) |> 
+  summarise(total_cases = n()) |> 
+  arrange(desc(total_cases)) |> 
+  mutate(boro_nm = tolower(boro_nm)) |>
+  collect()
+```
+
+Filtering bad boroughs, counting requests for each, and sorting them:
+```{r}
+requests_location <- requests_data |>
+  filter(Borough != "(null)", Borough != "Unspecified") |>
+  compute(prudence = "lavish") |>
+  summarise(total_requests = n(), .by = Borough) |>
+  arrange(desc(total_requests)) |>
+  mutate(Borough = tolower(Borough)) |>
+  collect()
+```
+
+Cleaning, combining, filtering 311 request and suspect coordinates, and converting them into a standard map format:
+```{r}
+requests_loc <- requests_data %>% 
+  clean_names() %>% 
+  select(x_coordinate_state_plane, y_coordinate_state_plane) %>% 
+  collect() %>% 
+  mutate(
+    x_coordinate_state_plane = as.numeric(gsub(",", "", x_coordinate_state_plane)),
+    y_coordinate_state_plane = as.numeric(gsub(",", "", y_coordinate_state_plane))) %>% 
+  filter(!is.na(x_coordinate_state_plane), !is.na(y_coordinate_state_plane)) %>% 
+  st_as_sf(coords = c("x_coordinate_state_plane", "y_coordinate_state_plane"), crs = 2263)
+
+suspects_map <- suspects %>% 
+  st_as_sf(coords = c("x_coord_cd", "y_coord_cd"), crs = 2263)
+
+coords_m <- bind_rows(
+  requests_loc %>%  select(geometry) %>% mutate(source = "311 Requests"),
+  suspects_map %>%  select(geometry) %>% mutate(source = "NYPD Suspects")) %>% 
+  filter(st_coordinates(.)[, "X"] > 900000, 
+         st_coordinates(.)[, "X"] < 1100000,
+         st_coordinates(.)[, "Y"] > 100000, 
+         st_coordinates(.)[, "Y"] < 300000)
+
+coords <- coords_m %>% 
+  st_transform(4326) %>% 
+  st_coordinates() %>%
+  as_tibble() %>% 
+  mutate(source = coords_m$source)
+```
+
+Visualization:
+```{r}
+ggplot() + 
+  geom_hex(data = coords, aes(x = X, y = Y, fill = after_stat(count)), bins = 40) + 
+  facet_wrap(~ source) +
+  geom_sf(data = st_transform(nyc_map, 4326), fill = NA, color = "white", alpha = 0.2, linewidth = 0.2) +
+  scale_fill_viridis_c(option = "viridis", direction = -1, trans = "log10", labels = label_number(accuracy = 1)) +
+  theme_void() + 
+  labs(title = "311 complaints and violations comparison", subtitle = "NYC map", fill = "Count",
+       caption = "Source: NYC Open Data") +
+  theme(plot.title = element_text(face = "bold", size = 18),
+        text = element_text(family = "sans"),
+        plot.background = element_rect(fill = "#fcfbfa", color = NA), 
+        plot.margin = margin_auto(1, unit = "cm"))
+
+```
+
+These maps show that there are much more 311 complaints than NYPD suspect reports, as indicated by the dark purple dominating the left map versus the green on the right. Despite this difference in volume, both 311 requests and suspect reports are most densely concentrated in the same areas, primarily Manhattan, and Staten Island has the lowest density for both
+
+# Common 311 complaints by borough
+
+Cleaning and counting top 5 311 complaints by borough:
+
+```{r}
+unique_requests <- requests_data |>
+  filter(Borough != "Unspecified") %>% 
+  collect() %>% 
+  mutate(`Complaint Type` = str_split_i(`Complaint Type`, pattern = " - ", i = 1)) %>% 
+  group_by(Borough, `Complaint Type`) |>
+  summarise(n = n(), .groups = 'drop') |>
+  arrange(Borough, -n) %>% 
+  group_by(Borough) %>% 
+  slice_head(n = 5)
+
+unique_requests <- unique_requests %>% 
+  mutate(n = n/1000, `Complaint Type` = tolower(`Complaint Type`), 
+         complaint_type = case_when(`Complaint Type` == "homeless person assistance" ~ "homeless assistance",
+                   T ~ `Complaint Type`))
+```
+
+Visualization:
+```{r}
+ggplot(unique_requests, aes(x = n, y = fct_reorder(complaint_type, n), fill = Borough)) + 
+  geom_col() +
+  facet_wrap(~ Borough, scale = "free") +
+  scale_fill_viridis_d(option = "viridis", direction = -1) +
+  theme_minimal() + 
+  labs(title = "Common 311 complaints by borough", subtitle = "(2024 - 2025)", fill = "Borough",
+       caption = "Source: NYC Open Data", y = NULL, x = "cases, k") +
+  theme(plot.title = element_text(face = "bold", size = 18),
+        text = element_text(family = "sans"),
+        plot.background = element_rect(fill = "#fcfbfa", color = NA), 
+        plot.margin = margin_auto(1, unit = "cm"),
+        axis.text = element_text(size = 8))
+```
+
+Based on the chart, "noise" is overwhelmingly the single biggest 311 complaint across all five boroughs. 
+Parking-related issues are also big concerns, appearing in the top 3 for nearly every borough. Beyond these universal problems, top complaints diverge, with Manhattan showing homelessness-related issues while Staten Island's concerns are more focused on public services.
+
+# Complaints to crimes ratio by borough
+
+Calculating and sorting the ratio of suspects to 311 requests for each borough:
+```{r}
+location_comparison <- location |>
+  inner_join(requests_location, by = c("boro_nm" = "Borough")) |>
+  mutate(
+    ratio = (total_cases / total_requests) * 100, 
+    boro_nm = toupper(boro_nm)
+  ) |>
+  arrange(desc(ratio))
+```
+
+Visualization:
+```{r}
+ggplot(location_comparison, aes(x = ratio, y = reorder(boro_nm, ratio), fill = boro_nm)) + 
+  geom_col() +
+  scale_fill_viridis_d(option = "viridis", direction = -1) +
+  theme_minimal() + 
+  labs(title = "Complaints to crime ratio", subtitle = "(2024 - 2025)", fill = "Borough",
+       caption = "Source: NYC Open Data", y = NULL, x = "percentage") +
+  theme(plot.title = element_text(face = "bold", size = 18),
+        text = element_text(family = "sans"),
+        plot.background = element_rect(fill = "#fcfbfa", color = NA), 
+        plot.margin = margin_auto(1, unit = "cm"),
+        axis.text = element_text(size = 8))
+```
+
+From the plot, we can see that Staten Island has the highest ratio at approximately 6.5%. 
+Queens has the lowest ratio, at just over 5%. 
+The other three boroughs are all clustered closely in the middle.
+
+# City improvements
+
+  The main idea is to stop treating all 311 complaints the same. For each district, we would analyze which types of complaints are most closely linked to crime and prioritize responses.
+
+  From the complains to crime ratio analysis, we can see that Staten Island has the highest ratio, meaning that complaints there are more likely to be linked to criminal activity. So, we would prioritize fixing anything out of order there.
+  
+    In Staten Island: A complaint should be treated as a high priority. Since the data connects these issues more closely to crime there, fixing them quickly is an important safety measure.
+
+    In Manhattan: A complaint about a homeless people should send social workers who can offer real help, not just police.
+
+    In Queens: A noise complaint, for example, might be handled with a simpler response, like a warning. This saves city resources for bigger problems, since the link between complaints and crime is the lowest there.
+
+It's a more efficient and effective way to improve safety and quality of life for everyone.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
